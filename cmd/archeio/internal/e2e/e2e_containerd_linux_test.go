@@ -78,7 +78,7 @@ func testE2EContainerdPull(t *testing.T, containerdVersion string) {
 [plugins."io.containerd.nri.v1.nri"]
   socket_path = %q
 `, os.Getuid(), os.Getgid(), nriSocketPath)
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write containerd config: %v", err)
 	}
 

@@ -19,6 +19,7 @@ limitations under the License.
 package e2e
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,31 +74,51 @@ func testE2EContainerdPull(t *testing.T, containerdVersion string) {
 		"--address="+socketAddress,
 		"--log-level=trace",
 	)
-	containerdCmd.Stderr = os.Stderr
+	// Capture containerd logs for debugging on failure
+	var containerdLogs bytes.Buffer
+	containerdCmd.Stderr = &containerdLogs
 	if err := containerdCmd.Start(); err != nil {
 		t.Fatalf("Failed to start containerd: %v", err)
 	}
+	// Channel to detect early containerd exit
+	containerdExited := make(chan error, 1)
+	go func() {
+		containerdExited <- containerdCmd.Wait()
+	}()
 	t.Cleanup(func() {
+		// Check if already exited
+		select {
+		case <-containerdExited:
+			// Already exited, nothing to do
+			return
+		default:
+		}
 		if err := containerdCmd.Process.Signal(os.Interrupt); err != nil {
-			t.Fatalf("failed to signal containerd: %v", err)
+			t.Logf("failed to signal containerd: %v", err)
+			return
 		}
 		// kill if it doesn't exit gracefully after 1s
-		done := make(chan error)
-		go func() { done <- containerdCmd.Wait() }()
 		select {
-		case <-done:
+		case <-containerdExited:
 			// exited
 		case <-time.After(time.Second):
 			// timed out
 			if err := containerdCmd.Process.Kill(); err != nil {
-				t.Fatalf("Failed to kill containerd: %v", err)
+				t.Logf("Failed to kill containerd: %v", err)
 			}
+			<-containerdExited // Wait for goroutine to complete
 		}
 	})
 
-	// wait for containerd to be ready
+	// wait for containerd to be ready (max ~55 seconds: 0+1+4+9+16+25)
 	containerdReady := false
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
+		// Check if containerd exited early
+		select {
+		case err := <-containerdExited:
+			t.Fatalf("containerd exited unexpectedly: %v\nLogs:\n%s", err, containerdLogs.String())
+		default:
+		}
 		// nolint:gosec
 		if err := exec.Command(filepath.Join(installDir, "ctr"), "--address="+socketAddress, "version").Run(); err == nil {
 			containerdReady = true
@@ -106,7 +127,13 @@ func testE2EContainerdPull(t *testing.T, containerdVersion string) {
 		time.Sleep(time.Duration(i*i) * time.Second)
 	}
 	if !containerdReady {
-		t.Fatalf("Failed to wait for containerd to be ready")
+		// Check one more time if it exited
+		select {
+		case err := <-containerdExited:
+			t.Fatalf("containerd exited while waiting for ready: %v\nLogs:\n%s", err, containerdLogs.String())
+		default:
+		}
+		t.Fatalf("Failed to wait for containerd to be ready after ~55s\nLogs:\n%s", containerdLogs.String())
 	}
 
 	// pull test images
